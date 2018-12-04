@@ -10,14 +10,14 @@ import (
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/session"
 	"v2ray.com/core/common/signal"
-	"v2ray.com/core/common/vio"
 	"v2ray.com/core/features/routing"
+	"v2ray.com/core/transport"
 )
 
 type ResponseCallback func(ctx context.Context, payload *buf.Buffer)
 
 type connEntry struct {
-	link   *vio.Link
+	link   *transport.Link
 	timer  signal.ActivityUpdater
 	cancel context.CancelFunc
 }
@@ -81,7 +81,7 @@ func (v *Dispatcher) Dispatch(ctx context.Context, destination net.Destination, 
 	conn := v.getInboundRay(ctx, destination)
 	outputStream := conn.link.Writer
 	if outputStream != nil {
-		if err := outputStream.WriteMultiBuffer(buf.NewMultiBufferValue(payload)); err != nil {
+		if err := outputStream.WriteMultiBuffer(buf.MultiBuffer{payload}); err != nil {
 			newError("failed to write first UDP payload").Base(err).WriteToLog(session.ExportIDToError(ctx))
 			conn.cancel()
 			return

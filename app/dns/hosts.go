@@ -7,8 +7,9 @@ import (
 	"v2ray.com/core/features"
 )
 
+// StaticHosts represents static domain-ip mapping in DNS server.
 type StaticHosts struct {
-	ips      map[uint32][]net.IP
+	ips      [][]net.IP
 	matchers *strmatcher.MatcherGroup
 }
 
@@ -31,10 +32,11 @@ func toStrMatcher(t DomainMatchingType, domain string) (strmatcher.Matcher, erro
 	return matcher, nil
 }
 
+// NewStaticHosts creates a new StaticHosts instance.
 func NewStaticHosts(hosts []*Config_HostMapping, legacy map[string]*net.IPOrDomain) (*StaticHosts, error) {
 	g := new(strmatcher.MatcherGroup)
 	sh := &StaticHosts{
-		ips:      make(map[uint32][]net.IP),
+		ips:      make([][]net.IP, len(hosts)+len(legacy)+16),
 		matchers: g,
 	}
 
@@ -71,10 +73,25 @@ func NewStaticHosts(hosts []*Config_HostMapping, legacy map[string]*net.IPOrDoma
 	return sh, nil
 }
 
-func (h *StaticHosts) LookupIP(domain string) []net.IP {
+func filterIP(ips []net.IP, option IPOption) []net.IP {
+	filtered := make([]net.IP, 0, len(ips))
+	for _, ip := range ips {
+		parsed := net.IPAddress(ip)
+		if (parsed.Family().IsIPv4() && option.IPv4Enable) || (parsed.Family().IsIPv6() && option.IPv6Enable) {
+			filtered = append(filtered, parsed.IP())
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
+}
+
+// LookupIP returns IP address for the given domain, if exists in this StaticHosts.
+func (h *StaticHosts) LookupIP(domain string, option IPOption) []net.IP {
 	id := h.matchers.Match(domain)
 	if id == 0 {
 		return nil
 	}
-	return h.ips[id]
+	return filterIP(h.ips[id], option)
 }

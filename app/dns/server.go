@@ -16,6 +16,7 @@ import (
 	"v2ray.com/core/features/routing"
 )
 
+// Server is a DNS rely server.
 type Server struct {
 	sync.Mutex
 	hosts          *StaticHosts
@@ -25,6 +26,7 @@ type Server struct {
 	domainIndexMap map[uint32]uint32
 }
 
+// New creates a new DNS server with given configuration.
 func New(ctx context.Context, config *Config) (*Server, error) {
 	server := &Server{
 		servers: make([]NameServerInterface, 0, len(config.NameServers)+len(config.NameServer)),
@@ -55,9 +57,9 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 				idx := len(server.servers)
 				server.servers = append(server.servers, nil)
 
-				core.RequireFeatures(ctx, func(d routing.Dispatcher) {
+				common.Must(core.RequireFeatures(ctx, func(d routing.Dispatcher) {
 					server.servers[idx] = NewClassicNameServer(dest, d, server.clientIP)
-				})
+				}))
 			}
 		}
 		return len(server.servers) - 1
@@ -81,7 +83,7 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 			for _, domain := range ns.PrioritizedDomain {
 				matcher, err := toStrMatcher(domain.Type, domain.Domain)
 				if err != nil {
-					return nil, newError("failed to create proritized domain").Base(err).AtWarning()
+					return nil, newError("failed to create prioritized domain").Base(err).AtWarning()
 				}
 				midx := domainMatcher.Add(matcher)
 				domainIndexMap[midx] = uint32(idx)
@@ -92,7 +94,7 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 		server.domainIndexMap = domainIndexMap
 	}
 
-	if len(config.NameServers) == 0 {
+	if len(server.servers) == 0 {
 		server.servers = append(server.servers, NewLocalNameServer())
 	}
 
@@ -114,16 +116,39 @@ func (s *Server) Close() error {
 	return nil
 }
 
-func (s *Server) queryIPTimeout(server NameServerInterface, domain string) ([]net.IP, error) {
+func (s *Server) queryIPTimeout(server NameServerInterface, domain string, option IPOption) ([]net.IP, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*4)
-	ips, err := server.QueryIP(ctx, domain)
+	ips, err := server.QueryIP(ctx, domain, option)
 	cancel()
 	return ips, err
 }
 
 // LookupIP implements dns.Client.
 func (s *Server) LookupIP(domain string) ([]net.IP, error) {
-	if ip := s.hosts.LookupIP(domain); len(ip) > 0 {
+	return s.lookupIPInternal(domain, IPOption{
+		IPv4Enable: true,
+		IPv6Enable: true,
+	})
+}
+
+// LookupIPv4 implements dns.IPv4Lookup.
+func (s *Server) LookupIPv4(domain string) ([]net.IP, error) {
+	return s.lookupIPInternal(domain, IPOption{
+		IPv4Enable: true,
+		IPv6Enable: false,
+	})
+}
+
+// LookupIPv6 implements dns.IPv6Lookup.
+func (s *Server) LookupIPv6(domain string) ([]net.IP, error) {
+	return s.lookupIPInternal(domain, IPOption{
+		IPv4Enable: false,
+		IPv6Enable: true,
+	})
+}
+
+func (s *Server) lookupIPInternal(domain string, option IPOption) ([]net.IP, error) {
+	if ip := s.hosts.LookupIP(domain, option); len(ip) > 0 {
 		return ip, nil
 	}
 
@@ -132,22 +157,24 @@ func (s *Server) LookupIP(domain string) ([]net.IP, error) {
 		idx := s.domainMatcher.Match(domain)
 		if idx > 0 {
 			ns := s.servers[s.domainIndexMap[idx]]
-			ips, err := s.queryIPTimeout(ns, domain)
+			ips, err := s.queryIPTimeout(ns, domain, option)
 			if len(ips) > 0 {
 				return ips, nil
 			}
 			if err != nil {
+				newError("failed to lookup ip for domain ", domain, " at server ", ns.Name()).Base(err).WriteToLog()
 				lastErr = err
 			}
 		}
 	}
 
 	for _, server := range s.servers {
-		ips, err := s.queryIPTimeout(server, domain)
+		ips, err := s.queryIPTimeout(server, domain, option)
 		if len(ips) > 0 {
 			return ips, nil
 		}
 		if err != nil {
+			newError("failed to lookup ip for domain ", domain, " at server ", server.Name()).Base(err).WriteToLog()
 			lastErr = err
 		}
 	}

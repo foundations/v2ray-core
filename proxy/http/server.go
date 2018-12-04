@@ -52,10 +52,8 @@ func (s *Server) policy() policy.Session {
 	return p
 }
 
-func (*Server) Network() net.NetworkList {
-	return net.NetworkList{
-		Network: []net.Network{net.Network_TCP},
-	}
+func (*Server) Network() []net.Network {
+	return []net.Network{net.Network_TCP}
 }
 
 func parseHost(rawHost string, defaultPort net.Port) (net.Destination, error) {
@@ -185,8 +183,7 @@ func (s *Server) handleConnect(ctx context.Context, request *http.Request, reade
 	}
 
 	if reader.Buffered() > 0 {
-		var payload buf.MultiBuffer
-		_, err := payload.ReadFrom(&io.LimitedReader{R: reader, N: int64(reader.Buffered())})
+		payload, err := buf.ReadFrom(io.LimitReader(reader, int64(reader.Buffered())))
 		if err != nil {
 			return err
 		}

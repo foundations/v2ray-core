@@ -5,13 +5,13 @@ import (
 
 	"v2ray.com/core"
 	"v2ray.com/core/app/proxyman"
-	"v2ray.com/core/app/proxyman/mux"
 	"v2ray.com/core/common"
+	"v2ray.com/core/common/mux"
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/session"
-	"v2ray.com/core/common/vio"
 	"v2ray.com/core/features/outbound"
 	"v2ray.com/core/proxy"
+	"v2ray.com/core/transport"
 	"v2ray.com/core/transport/internet"
 	"v2ray.com/core/transport/pipe"
 )
@@ -72,7 +72,18 @@ func NewHandler(ctx context.Context, config *core.OutboundHandlerConfig) (outbou
 		if config.Concurrency < 1 || config.Concurrency > 1024 {
 			return nil, newError("invalid mux concurrency: ", config.Concurrency).AtWarning()
 		}
-		h.mux = mux.NewClientManager(proxyHandler, h, config)
+		h.mux = &mux.ClientManager{
+			Picker: &mux.IncrementalWorkerPicker{
+				Factory: &mux.DialingWorkerFactory{
+					Proxy:  proxyHandler,
+					Dialer: h,
+					Strategy: mux.ClientStrategy{
+						MaxConcurrency: config.Concurrency,
+						MaxConnection:  128,
+					},
+				},
+			},
+		}
 	}
 
 	h.proxy = proxyHandler
@@ -85,7 +96,7 @@ func (h *Handler) Tag() string {
 }
 
 // Dispatch implements proxy.Outbound.Dispatch.
-func (h *Handler) Dispatch(ctx context.Context, link *vio.Link) {
+func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
 	if h.mux != nil {
 		if err := h.mux.Dispatch(ctx, link); err != nil {
 			newError("failed to process mux outbound traffic").Base(err).WriteToLog(session.ExportIDToError(ctx))
@@ -101,6 +112,14 @@ func (h *Handler) Dispatch(ctx context.Context, link *vio.Link) {
 		}
 		pipe.CloseError(link.Reader)
 	}
+}
+
+// Address implements internet.Dialer.
+func (h *Handler) Address() net.Address {
+	if h.senderSettings == nil || h.senderSettings.Via == nil {
+		return nil
+	}
+	return h.senderSettings.Via.AsAddress()
 }
 
 // Dial implements internet.Dialer.
@@ -119,7 +138,7 @@ func (h *Handler) Dial(ctx context.Context, dest net.Destination) (internet.Conn
 				uplinkReader, uplinkWriter := pipe.New(opts...)
 				downlinkReader, downlinkWriter := pipe.New(opts...)
 
-				go handler.Dispatch(ctx, &vio.Link{Reader: uplinkReader, Writer: downlinkWriter})
+				go handler.Dispatch(ctx, &transport.Link{Reader: uplinkReader, Writer: downlinkWriter})
 				return net.NewConnection(net.ConnectionInputMulti(uplinkWriter), net.ConnectionOutputMulti(downlinkReader)), nil
 			}
 
@@ -134,11 +153,9 @@ func (h *Handler) Dial(ctx context.Context, dest net.Destination) (internet.Conn
 			}
 			outbound.Gateway = h.senderSettings.Via.AsAddress()
 		}
-
-		ctx = internet.ContextWithStreamSettings(ctx, h.streamSettings)
 	}
 
-	return internet.Dial(ctx, dest)
+	return internet.Dial(ctx, dest, h.streamSettings)
 }
 
 // GetOutbound implements proxy.GetOutbound.

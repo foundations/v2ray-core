@@ -8,17 +8,23 @@ import (
 	"v2ray.com/core/common"
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/session"
-	"v2ray.com/core/features/mocks"
+	"v2ray.com/core/features/outbound"
+	"v2ray.com/core/testing/mocks"
 )
+
+type mockOutboundManager struct {
+	outbound.Manager
+	outbound.HandlerSelector
+}
 
 func TestSimpleRouter(t *testing.T) {
 	config := &Config{
 		Rule: []*RoutingRule{
 			{
-				Tag: "test",
-				NetworkList: &net.NetworkList{
-					Network: []net.Network{net.Network_TCP},
+				TargetTag: &RoutingRule_Tag{
+					Tag: "test",
 				},
+				Networks: []net.Network{net.Network_TCP},
 			},
 		},
 	}
@@ -26,10 +32,56 @@ func TestSimpleRouter(t *testing.T) {
 	mockCtl := gomock.NewController(t)
 	defer mockCtl.Finish()
 
-	mockDns := mocks.NewMockDNSClient(mockCtl)
+	mockDns := mocks.NewDNSClient(mockCtl)
+	mockOhm := mocks.NewOutboundManager(mockCtl)
+	mockHs := mocks.NewOutboundHandlerSelector(mockCtl)
 
 	r := new(Router)
-	common.Must(r.Init(config, mockDns))
+	common.Must(r.Init(config, mockDns, &mockOutboundManager{
+		Manager:         mockOhm,
+		HandlerSelector: mockHs,
+	}))
+
+	ctx := withOutbound(&session.Outbound{Target: net.TCPDestination(net.DomainAddress("v2ray.com"), 80)})
+	tag, err := r.PickRoute(ctx)
+	common.Must(err)
+	if tag != "test" {
+		t.Error("expect tag 'test', bug actually ", tag)
+	}
+}
+
+func TestSimpleBalancer(t *testing.T) {
+	config := &Config{
+		Rule: []*RoutingRule{
+			{
+				TargetTag: &RoutingRule_BalancingTag{
+					BalancingTag: "balance",
+				},
+				Networks: []net.Network{net.Network_TCP},
+			},
+		},
+		BalancingRule: []*BalancingRule{
+			{
+				Tag:              "balance",
+				OutboundSelector: []string{"test-"},
+			},
+		},
+	}
+
+	mockCtl := gomock.NewController(t)
+	defer mockCtl.Finish()
+
+	mockDns := mocks.NewDNSClient(mockCtl)
+	mockOhm := mocks.NewOutboundManager(mockCtl)
+	mockHs := mocks.NewOutboundHandlerSelector(mockCtl)
+
+	mockHs.EXPECT().Select(gomock.Eq([]string{"test-"})).Return([]string{"test"})
+
+	r := new(Router)
+	common.Must(r.Init(config, mockDns, &mockOutboundManager{
+		Manager:         mockOhm,
+		HandlerSelector: mockHs,
+	}))
 
 	ctx := withOutbound(&session.Outbound{Target: net.TCPDestination(net.DomainAddress("v2ray.com"), 80)})
 	tag, err := r.PickRoute(ctx)
@@ -44,7 +96,9 @@ func TestIPOnDemand(t *testing.T) {
 		DomainStrategy: Config_IpOnDemand,
 		Rule: []*RoutingRule{
 			{
-				Tag: "test",
+				TargetTag: &RoutingRule_Tag{
+					Tag: "test",
+				},
 				Cidr: []*CIDR{
 					{
 						Ip:     []byte{192, 168, 0, 0},
@@ -58,11 +112,11 @@ func TestIPOnDemand(t *testing.T) {
 	mockCtl := gomock.NewController(t)
 	defer mockCtl.Finish()
 
-	mockDns := mocks.NewMockDNSClient(mockCtl)
+	mockDns := mocks.NewDNSClient(mockCtl)
 	mockDns.EXPECT().LookupIP(gomock.Eq("v2ray.com")).Return([]net.IP{{192, 168, 0, 1}}, nil).AnyTimes()
 
 	r := new(Router)
-	common.Must(r.Init(config, mockDns))
+	common.Must(r.Init(config, mockDns, nil))
 
 	ctx := withOutbound(&session.Outbound{Target: net.TCPDestination(net.DomainAddress("v2ray.com"), 80)})
 	tag, err := r.PickRoute(ctx)
