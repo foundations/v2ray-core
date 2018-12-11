@@ -160,14 +160,20 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	responseDone := func() error {
 		defer timer.SetTimeout(plcy.Timeouts.UplinkOnly)
 
-		if err := buf.Copy(buf.NewReader(conn), output, buf.UpdateActivity(timer)); err != nil {
+		var reader buf.Reader
+		if destination.Network == net.Network_TCP {
+			reader = buf.NewReader(conn)
+		} else {
+			reader = &buf.PacketReader{Reader: conn}
+		}
+		if err := buf.Copy(reader, output, buf.UpdateActivity(timer)); err != nil {
 			return newError("failed to process response").Base(err)
 		}
 
 		return nil
 	}
 
-	if err := task.Run(task.WithContext(ctx), task.Parallel(requestDone, task.Single(responseDone, task.OnSuccess(task.Close(output)))))(); err != nil {
+	if err := task.Run(ctx, requestDone, task.OnSuccess(responseDone, task.Close(output))); err != nil {
 		return newError("connection ends").Base(err)
 	}
 
