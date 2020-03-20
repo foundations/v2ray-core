@@ -1,3 +1,5 @@
+// +build !confonly
+
 package http
 
 import (
@@ -15,6 +17,7 @@ import (
 	"v2ray.com/core/common/errors"
 	"v2ray.com/core/common/log"
 	"v2ray.com/core/common/net"
+	"v2ray.com/core/common/protocol"
 	http_proto "v2ray.com/core/common/protocol/http"
 	"v2ray.com/core/common/session"
 	"v2ray.com/core/common/signal"
@@ -22,7 +25,6 @@ import (
 	"v2ray.com/core/features/policy"
 	"v2ray.com/core/features/routing"
 	"v2ray.com/core/transport/internet"
-	"v2ray.com/core/transport/pipe"
 )
 
 // Server is an HTTP proxy server.
@@ -51,6 +53,7 @@ func (s *Server) policy() policy.Session {
 	return p
 }
 
+// Network implements proxy.Inbound.
 func (*Server) Network() []net.Network {
 	return []net.Network{net.Network_TCP}
 }
@@ -82,6 +85,13 @@ type readerOnly struct {
 }
 
 func (s *Server) Process(ctx context.Context, network net.Network, conn internet.Connection, dispatcher routing.Dispatcher) error {
+	inbound := session.InboundFromContext(ctx)
+	if inbound != nil {
+		inbound.User = &protocol.MemoryUser{
+			Level: s.config.UserLevel,
+		}
+	}
+
 	reader := bufio.NewReaderSize(readerOnly{conn}, buf.Size)
 
 Start:
@@ -103,6 +113,9 @@ Start:
 		if !ok || !s.config.HasAccount(user, pass) {
 			return common.Error2(conn.Write([]byte("HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"proxy\"\r\n\r\n")))
 		}
+		if inbound != nil {
+			inbound.User.Email = user
+		}
 	}
 
 	newError("request to Method [", request.Method, "] Host [", request.Host, "] with URL [", request.URL, "]").WriteToLog(session.ExportIDToError(ctx))
@@ -111,24 +124,25 @@ Start:
 	}
 
 	defaultPort := net.Port(80)
-	if strings.ToLower(request.URL.Scheme) == "https" {
+	if strings.EqualFold(request.URL.Scheme, "https") {
 		defaultPort = net.Port(443)
 	}
 	host := request.Host
-	if len(host) == 0 {
+	if host == "" {
 		host = request.URL.Host
 	}
 	dest, err := http_proto.ParseHost(host, defaultPort)
 	if err != nil {
 		return newError("malformed proxy host: ", host).AtWarning().Base(err)
 	}
-	log.Record(&log.AccessMessage{
+	ctx = log.ContextWithAccessMessage(ctx, &log.AccessMessage{
 		From:   conn.RemoteAddr(),
 		To:     request.URL,
 		Status: log.AccessAccepted,
+		Reason: "",
 	})
 
-	if strings.ToUpper(request.Method) == "CONNECT" {
+	if strings.EqualFold(request.Method, "CONNECT") {
 		return s.handleConnect(ctx, request, reader, conn, dest, dispatcher)
 	}
 
@@ -191,8 +205,8 @@ func (s *Server) handleConnect(ctx context.Context, request *http.Request, reade
 
 	var closeWriter = task.OnSuccess(requestDone, task.Close(link.Writer))
 	if err := task.Run(ctx, closeWriter, responseDone); err != nil {
-		pipe.CloseError(link.Reader)
-		pipe.CloseError(link.Writer)
+		common.Interrupt(link.Reader)
+		common.Interrupt(link.Writer)
 		return newError("connection ends").Base(err)
 	}
 
@@ -202,7 +216,7 @@ func (s *Server) handleConnect(ctx context.Context, request *http.Request, reade
 var errWaitAnother = newError("keep alive")
 
 func (s *Server) handlePlainHTTP(ctx context.Context, request *http.Request, writer io.Writer, dest net.Destination, dispatcher routing.Dispatcher) error {
-	if !s.config.AllowTransparent && len(request.URL.Host) <= 0 {
+	if !s.config.AllowTransparent && request.URL.Host == "" {
 		// RFC 2068 (HTTP/1.1) requires URL to be absolute URL in HTTP proxy.
 		response := &http.Response{
 			Status:        "Bad Request",
@@ -226,9 +240,22 @@ func (s *Server) handlePlainHTTP(ctx context.Context, request *http.Request, wri
 	http_proto.RemoveHopByHopHeaders(request.Header)
 
 	// Prevent UA from being set to golang's default ones
-	if len(request.Header.Get("User-Agent")) == 0 {
+	if request.Header.Get("User-Agent") == "" {
 		request.Header.Set("User-Agent", "")
 	}
+
+	content := &session.Content{
+		Protocol: "http/1.1",
+	}
+
+	content.SetAttribute(":method", strings.ToUpper(request.Method))
+	content.SetAttribute(":path", request.URL.Path)
+	for key := range request.Header {
+		value := request.Header.Get(key)
+		content.SetAttribute(strings.ToLower(key), value)
+	}
+
+	ctx = session.ContextWithContent(ctx, content)
 
 	link, err := dispatcher.Dispatch(ctx, dest)
 	if err != nil {
@@ -287,8 +314,8 @@ func (s *Server) handlePlainHTTP(ctx context.Context, request *http.Request, wri
 	}
 
 	if err := task.Run(ctx, requestDone, responseDone); err != nil {
-		pipe.CloseError(link.Reader)
-		pipe.CloseError(link.Writer)
+		common.Interrupt(link.Reader)
+		common.Interrupt(link.Writer)
 		return newError("connection ends").Base(err)
 	}
 
